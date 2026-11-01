@@ -1,8 +1,8 @@
 //! Runs git, and reports its failures.
 
 use std::ffi::OsStr;
-use std::io;
-use std::process::{Command, ExitStatus, Output};
+use std::io::{self, Write};
+use std::process::{Command, ExitStatus, Output, Stdio};
 
 /// A program that could not be run, or that failed.
 #[derive(Debug, thiserror::Error)]
@@ -44,9 +44,46 @@ pub fn run(command: &mut Command) -> Result<Output, Error> {
     })
 }
 
+/// Runs a command with `input` on its standard input, to its end, with its output captured,
+/// whatever its exit status.
+pub fn run_with_input(command: &mut Command, input: &[u8]) -> Result<Output, Error> {
+    let described = describe(command);
+    let spawn = |source| Error::Spawn {
+        command: described.clone(),
+        source,
+    };
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(spawn)?;
+    // The input is written beside the reading of the output, which git cat-file writes before it
+    // has read all of its input.
+    let mut stdin = child.stdin.take().unwrap();
+    let (written, output) = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || stdin.write_all(input));
+        let output = child.wait_with_output();
+        (writer.join().unwrap(), output)
+    });
+    let output = output.map_err(spawn)?;
+    match written {
+        Err(err) if err.kind() != io::ErrorKind::BrokenPipe => Err(spawn(err)),
+        _ => Ok(output),
+    }
+}
+
 /// Runs a command, and returns its standard output when it succeeds.
 pub fn bytes(command: &mut Command) -> Result<Vec<u8>, Error> {
     let output = run(command)?;
+    success(command, &output)?;
+    Ok(output.stdout)
+}
+
+/// Runs a command with `input` on its standard input, and returns its standard output when it
+/// succeeds.
+pub fn bytes_with_input(command: &mut Command, input: &[u8]) -> Result<Vec<u8>, Error> {
+    let output = run_with_input(command, input)?;
     success(command, &output)?;
     Ok(output.stdout)
 }

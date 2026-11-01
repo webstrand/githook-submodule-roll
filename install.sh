@@ -2,7 +2,8 @@
 # Installs the submodule roll into the repository this is run from: cargo
 # install puts the binary in bin/ in its common git directory, and the
 # repository's config registers it as a post-checkout and a post-merge hook, so
-# that it runs beside any other hooks of the events. The command finds the git
+# that it runs beside any other hooks of the events, and each submodule's
+# remotes fetch their replaces notes. The command finds the git
 # directory each time it runs, so the repository may move. Running this again
 # updates the hook.
 set -euo pipefail
@@ -22,6 +23,16 @@ for event in post-checkout post-merge post-rewrite; do
   git config "hook.submodule-roll-$event.event" "$event"
   git config "hook.submodule-roll-$event.command" "$bin/githook-submodule-roll $event"
 done
+# The replaces notes of each submodule's remotes come in with its fetches. The
+# refspec is a glob so that a remote without them matches nothing.
+# shellcheck disable=SC2016
+git submodule foreach --quiet --recursive '
+  for remote in $(git remote); do
+    spec="+refs/notes/replaces*:refs/notes/remotes/$remote/replaces*"
+    git config --get-all "remote.$remote.fetch" | grep -qxF -- "$spec" ||
+      git config --add "remote.$remote.fetch" "$spec"
+  done
+'
 echo "githook-submodule-roll: installed into $root/bin"
 # The submodules are rolled forward from the pins of the index, as the next
 # checkout would roll them.

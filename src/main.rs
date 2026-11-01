@@ -1,9 +1,11 @@
 //! Rolls each submodule forward, after a checkout or a merge, from the commit that its parent
-//! pins to the highest release tag that contains the pin and is compatible with the highest
-//! version tagged at or before it, as cargo reads semver. A submodule that the operator moved off
+//! pins to the highest release tag that contains the pin, or a version of it that the replaces
+//! notes say a rewrite made, and is compatible with the highest version tagged at or before it,
+//! as cargo reads semver. A submodule that the operator moved off
 //! its pin, put on a branch or changed is left as it is. The submodules within a submodule are
 //! rolled forward from the pins of the commit that it is left at.
 
+mod replaces;
 mod repo;
 mod roll;
 mod runner;

@@ -1,6 +1,7 @@
 //! Rolls each submodule forward from the commit that its parent pins to the tag that `tags`
 //! finds, and the submodules within it, in turn.
 
+use crate::replaces::Replaces;
 use crate::repo::Repo;
 use crate::runner::{self, Error};
 use crate::tags;
@@ -37,7 +38,11 @@ fn submodule(parent: &Repo, path: &str, pin: &str, prev: &[String]) -> Result<()
     if on_branch {
         return roll(&sub, std::slice::from_ref(&head));
     }
-    if sub.commit(pin)?.is_none() {
+    let replaces = Replaces::read(&sub)?;
+    let target = tags::target(&sub, pin, &replaces)?;
+    // A pin that a rewrite replaced may be gone from the remote, and is rolled forward from the
+    // versions of it that the notes name.
+    if target.is_none() && sub.commit(pin)?.is_none() {
         eprintln!(
             "{NAME}: {}: the pinned commit {} is not in the submodule; git submodule update fetches it",
             sub.path(),
@@ -45,10 +50,15 @@ fn submodule(parent: &Repo, path: &str, pin: &str, prev: &[String]) -> Result<()
         );
         return Ok(());
     }
-    let target = tags::target(&sub, pin)?;
     // A pin that no remote branch or tag holds is one that was rewritten or never pushed, and a
     // clone that fetches the remote cannot check it out.
-    if sub.has_remote_branches()? && !sub.is_published(pin)? {
+    if target
+        .as_ref()
+        .is_none_or(|target| target.rewritten.is_none())
+        && sub.commit(pin)?.is_some()
+        && sub.has_remote_branches()?
+        && !sub.is_published(pin)?
+    {
         eprintln!(
             "{NAME}: {}: warning: the pinned commit {} is on no branch or tag of the submodule's remotes; it was rewritten or never pushed, and other clones cannot check it out",
             sub.path(),
@@ -57,7 +67,7 @@ fn submodule(parent: &Repo, path: &str, pin: &str, prev: &[String]) -> Result<()
     }
     let wanted = target.as_ref().map_or(pin, |target| target.commit.as_str());
     if head != wanted {
-        if !follows(parent, &sub, path, pin, prev, &head)? {
+        if !follows(parent, &sub, &replaces, path, pin, prev, &head)? {
             return roll(&sub, std::slice::from_ref(&head));
         }
         let changes = sub.stdout([
@@ -98,13 +108,29 @@ fn submodule(parent: &Repo, path: &str, pin: &str, prev: &[String]) -> Result<()
             return roll(&sub, std::slice::from_ref(&head));
         }
         match &target {
-            Some(target) => eprintln!(
-                "{NAME}: {}: rolled forward from {}, after {}, to {}",
-                sub.path(),
-                short(pin),
-                target.base,
-                target.tag
-            ),
+            Some(target) => {
+                eprintln!(
+                    "{NAME}: {}: rolled forward from {}, after {}, to {}{}",
+                    sub.path(),
+                    short(pin),
+                    target.base,
+                    target.tag,
+                    if target.rewritten.is_some() {
+                        ", which holds a rewrite of it"
+                    } else {
+                        ""
+                    }
+                );
+                if let Some(version) = &target.rewritten {
+                    eprintln!(
+                        "{NAME}: {}: warning: only the replaces notes tie the pin {} to {}, which stands in its place; the notes may be lost, and the parent should pin {} instead",
+                        sub.path(),
+                        short(pin),
+                        short(version),
+                        short(version)
+                    );
+                }
+            }
             None => eprintln!(
                 "{NAME}: {}: checked out the pinned {}",
                 sub.path(),
@@ -121,6 +147,7 @@ fn submodule(parent: &Repo, path: &str, pin: &str, prev: &[String]) -> Result<()
 fn follows(
     parent: &Repo,
     sub: &Repo,
+    replaces: &Replaces,
     path: &str,
     pin: &str,
     prev: &[String],
@@ -140,8 +167,7 @@ fn follows(
             continue;
         };
         if head == prev_pin
-            || (sub.commit(&prev_pin)?.is_some()
-                && tags::target(sub, &prev_pin)?.is_some_and(|target| target.commit == head))
+            || tags::target(sub, &prev_pin, replaces)?.is_some_and(|target| target.commit == head)
         {
             return Ok(true);
         }

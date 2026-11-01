@@ -364,6 +364,112 @@ fn rolls_forward_when_run_by_hand() {
     );
 }
 
+/// The refspec that fetches a remote's replaces notes, as `install.sh` adds it.
+const NOTES_REFSPEC: &str = "+refs/notes/replaces*:refs/notes/remotes/origin/replaces*";
+
+/// A library with the history `root - v1.2.3 - pin`. Returns `root` and `pin`.
+fn library_to_rewrite(dir: &Path) -> (String, String) {
+    init(dir);
+    let root = commit(dir, "root");
+    commit(dir, "base");
+    tag(dir, "v1.2.3");
+    let pin = commit(dir, "pin");
+    (root, pin)
+}
+
+/// Amends the library's `pin` as a rewrite would, releases `v1.4.0` after the rewrite, and, when
+/// `notes`, records in its replaces notes that the rewrite replaces `pin`. Returns the rewrite.
+fn rewrite(dir: &Path, pin: &str, notes: bool) -> String {
+    git(dir, &["checkout", "-q", "--detach", pin]);
+    git(dir, &["commit", "-q", "--amend", "-m", "pin, amended"]);
+    let rewritten = rev(dir, "HEAD");
+    git(dir, &["checkout", "-q", "-B", "main", &rewritten]);
+    commit(dir, "v1.4.0");
+    tag(dir, "v1.4.0");
+    if notes {
+        let note = format!("replaces: {pin}");
+        git(
+            dir,
+            &["notes", "--ref", "replaces", "add", "-m", &note, &rewritten],
+        );
+    }
+    rewritten
+}
+
+/// Fetches the library into the submodule, with the replaces notes.
+fn fetch_with_notes(sub: &Path) {
+    git(
+        sub,
+        &["config", "--add", "remote.origin.fetch", NOTES_REFSPEC],
+    );
+    git(sub, &["fetch", "-q", "origin"]);
+}
+
+#[test]
+fn rolls_forward_to_a_tag_that_holds_a_rewrite_of_the_pin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = tmp.path().join("lib");
+    let app = tmp.path().join("app");
+    let (_, pin) = library_to_rewrite(&lib);
+    application(&app, &lib, &pin);
+    rewrite(&lib, &pin, true);
+    fetch_with_notes(&app.join("lib"));
+    let (_, stderr) = git(&app, &["checkout", "-q", "-b", "other"]);
+    assert_eq!(rev(&app.join("lib"), "HEAD"), rev(&lib, "v1.4.0^{commit}"));
+    assert!(
+        stderr.contains("to v1.4.0, which holds a rewrite of it"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("warning: only the replaces notes tie the pin"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn stays_at_a_rewritten_pin_without_notes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = tmp.path().join("lib");
+    let app = tmp.path().join("app");
+    let (_, pin) = library_to_rewrite(&lib);
+    application(&app, &lib, &pin);
+    rewrite(&lib, &pin, false);
+    fetch_with_notes(&app.join("lib"));
+    let (_, stderr) = git(&app, &["checkout", "-q", "-b", "other"]);
+    assert_eq!(rev(&app.join("lib"), "HEAD"), pin);
+    assert!(
+        stderr.contains("is on no branch or tag of the submodule's remotes"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn rolls_forward_from_a_rewritten_pin_that_the_submodule_lacks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = tmp.path().join("lib");
+    let app = tmp.path().join("app");
+    let (root, pin) = library_to_rewrite(&lib);
+    application(&app, &lib, &root);
+    let sub = app.join("lib");
+    git(&sub, &["checkout", "-q", "--detach", &pin]);
+    git(&app, &["commit", "-q", "-am", "pin"]);
+    git(&app, &["checkout", "-q", "--detach", "HEAD^"]);
+    git(&sub, &["checkout", "-q", "--detach", &root]);
+    rewrite(&lib, &pin, true);
+    fetch_with_notes(&sub);
+    git(&sub, &["branch", "-q", "-D", "main"]);
+    git(&sub, &["reflog", "expire", "--expire=now", "--all"]);
+    git(&sub, &["gc", "-q", "--prune=now"]);
+    assert!(
+        !command(&sub, &["cat-file", "-e", &pin])
+            .status()
+            .unwrap()
+            .success()
+    );
+    git(&app, &["checkout", "-q", "main"]);
+    assert_eq!(rev(&sub, "HEAD"), rev(&lib, "v1.4.0^{commit}"));
+}
+
 #[test]
 fn leaves_a_submodule_whose_untracked_files_the_target_would_overwrite() {
     let tmp = tempfile::tempdir().unwrap();
