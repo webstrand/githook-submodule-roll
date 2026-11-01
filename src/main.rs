@@ -5,8 +5,10 @@
 //! its pin, put on a branch or changed is left as it is. The submodules within a submodule are
 //! rolled forward from the pins of the commit that it is left at.
 
+mod error;
 mod replaces;
 mod repo;
+mod rewrite;
 mod roll;
 mod runner;
 mod tags;
@@ -38,6 +40,16 @@ enum Cli {
     PostRewrite { command: String },
     /// Rolls forward the submodules that are at the pins of the index, as after a checkout.
     Roll,
+    /// Rewrites the history of branches so that each pin that a rewrite of its submodule
+    /// replaced, and that the submodule's remotes no longer hold, names the version of it that
+    /// they hold, as the replaces notes tell.
+    RewritePins {
+        /// Prints the pins that would be rewritten, and rewrites nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// The branches to rewrite; the current branch when none is given.
+        branches: Vec<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -50,7 +62,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<(), runner::Error> {
+fn run(cli: Cli) -> Result<(), error::Error> {
     let prev = match cli {
         Cli::PostCheckout { branch, .. } if branch == "0" => return Ok(()),
         Cli::PostCheckout { prev, .. } if prev.bytes().all(|b| b == b'0') => Vec::new(),
@@ -67,9 +79,13 @@ fn run(cli: Cli) -> Result<(), runner::Error> {
             prev
         }
         Cli::Roll => Vec::new(),
+        Cli::RewritePins { dry_run, branches } => {
+            let repo = Repo::top()?;
+            return rewrite::rewrite_pins(&repo, rewrite::Options { branches, dry_run });
+        }
     };
     let repo = Repo::top()?;
-    roll::roll(&repo, &prev)
+    Ok(roll::roll(&repo, &prev)?)
 }
 
 /// The commit that the rebase that ends started from, which git checked out, and rolled the

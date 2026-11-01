@@ -123,7 +123,7 @@ fn submodule(parent: &Repo, path: &str, pin: &str, prev: &[String]) -> Result<()
                 );
                 if let Some(version) = &target.rewritten {
                     eprintln!(
-                        "{NAME}: {}: warning: only the replaces notes tie the pin {} to {}, which stands in its place; the notes may be lost, and the parent should pin {} instead",
+                        "{NAME}: {}: warning: only the replaces notes tie the pin {} to {}, which stands in its place; the notes may be lost, and the parent should pin {} instead, or rewrite its history with githook-submodule-roll rewrite-pins",
                         sub.path(),
                         short(pin),
                         short(version),

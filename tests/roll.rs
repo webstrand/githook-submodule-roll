@@ -1,6 +1,7 @@
 //! Runs the hook in scratch repositories, as git runs it after a checkout or a merge.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -560,4 +561,162 @@ fn follows_the_pin_of_the_commits_that_a_rebase_replays() {
     assert_eq!(rev(&lib, "HEAD"), rev(&f.lib, "v2.0.0^{commit}"));
     git(&f.app, &["rebase", "-q", "main"]);
     assert_eq!(rev(&lib, "HEAD"), rev(&f.lib, "v2.0.0^{commit}"));
+}
+
+/// An application whose two commits pin `pin`, after which the library rewrites it, with
+/// replaces notes, and keeps the old commits on the branch `keep` when `keep`. Returns the
+/// fixture and the rewrite.
+fn rewritten_pin(keep: bool) -> (Fixture, String) {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = tmp.path().join("lib");
+    let app = tmp.path().join("app");
+    let (_, pin) = library_to_rewrite(&lib);
+    if keep {
+        git(&lib, &["branch", "keep", &pin]);
+    }
+    application(&app, &lib, &pin);
+    commit(&app, "later");
+    let rewritten = rewrite(&lib, &pin, true);
+    fetch_with_notes(&app.join("lib"));
+    replaces_index(&app);
+    let fixture = Fixture {
+        _tmp: tmp,
+        lib,
+        app,
+        pin,
+    };
+    (fixture, rewritten)
+}
+
+/// Registers a stand-in for the post-rewrite hook of githook-replaces-index, which writes what
+/// it is given to `.git/rewrites`.
+fn replaces_index(app: &Path) {
+    let bin = app.join(".git/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let hook = bin.join("githook-replaces-index-post-rewrite");
+    fs::write(
+        &hook,
+        "#!/bin/sh\ncat > \"$(git rev-parse --git-dir)/rewrites\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        app,
+        &["config", "hook.replaces-index.event", "post-rewrite"],
+    );
+    git(
+        app,
+        &[
+            "config",
+            "hook.replaces-index.command",
+            "\"$(git rev-parse --git-common-dir)\"/bin/githook-replaces-index-post-rewrite",
+        ],
+    );
+}
+
+fn rewrite_pins(app: &Path, args: &[&str]) -> String {
+    let output = rewrite_pins_output(app, args);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "{stderr}");
+    stderr
+}
+
+fn rewrite_pins_output(app: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(HOOK)
+        .arg("rewrite-pins")
+        .args(args)
+        .current_dir(app)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env_remove("GIT_DIR")
+        .output()
+        .unwrap()
+}
+
+/// The metadata and message of each commit of `app`'s current branch.
+fn log(app: &Path) -> String {
+    git(app, &["log", "--format=%an %ae %ad %cn %ce %cd %B"]).0
+}
+
+#[test]
+fn rewrites_a_pin_that_the_remote_dropped_in_every_commit() {
+    let (f, rewritten) = rewritten_pin(false);
+    let before = log(&f.app);
+    let stderr = rewrite_pins(&f.app, &[]);
+    assert!(
+        stderr.contains(&format!("lib: {} -> {rewritten}", f.pin)),
+        "{stderr}"
+    );
+    assert_eq!(rev(&f.app, "HEAD:lib"), rewritten);
+    assert_eq!(rev(&f.app, "HEAD^:lib"), rewritten);
+    assert_eq!(rev(&f.app, ":lib"), rewritten);
+    assert_eq!(log(&f.app), before);
+}
+
+#[test]
+fn leaves_a_rewritten_pin_that_the_remote_still_holds() {
+    let (f, _) = rewritten_pin(true);
+    let head = rev(&f.app, "HEAD");
+    let stderr = rewrite_pins(&f.app, &[]);
+    assert!(stderr.contains("no pin to rewrite"), "{stderr}");
+    assert_eq!(rev(&f.app, "HEAD"), head);
+}
+
+#[test]
+fn rewrites_nothing_in_a_dry_run() {
+    let (f, rewritten) = rewritten_pin(false);
+    let head = rev(&f.app, "HEAD");
+    let stderr = rewrite_pins(&f.app, &["--dry-run"]);
+    assert!(
+        stderr.contains(&format!("lib: {} -> {rewritten}", f.pin)),
+        "{stderr}"
+    );
+    assert!(stderr.contains("would rewrite 2 commits"), "{stderr}");
+    assert_eq!(rev(&f.app, "HEAD"), head);
+    assert_eq!(rev(&f.app, ":lib"), f.pin);
+}
+
+#[test]
+fn passes_the_rewrite_to_the_post_rewrite_hooks() {
+    let (f, _) = rewritten_pin(false);
+    let old = git(&f.app, &["rev-list", "--reverse", "HEAD"]).0;
+    let record = f.app.join(".git/rewrites");
+    rewrite_pins(&f.app, &[]);
+    let new = git(&f.app, &["rev-list", "--reverse", "HEAD"]).0;
+    let expected: String = old
+        .lines()
+        .zip(new.lines())
+        .map(|(old, new)| format!("{old} {new}\n"))
+        .collect();
+    assert_eq!(fs::read_to_string(record).unwrap(), expected);
+}
+
+#[test]
+fn warns_when_a_rewritten_commit_was_pushed() {
+    let (f, _) = rewritten_pin(false);
+    git(&f.app, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    let stderr = rewrite_pins(&f.app, &[]);
+    assert!(
+        stderr.contains("warning: origin/main holds commits that were rewritten"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn refuses_to_rewrite_pins_unless_the_replaces_index_records_the_rewrite() {
+    let (f, _) = rewritten_pin(false);
+    git(
+        &f.app,
+        &["config", "--unset", "hook.replaces-index.command"],
+    );
+    git(&f.app, &["config", "--unset", "hook.replaces-index.event"]);
+    let head = rev(&f.app, "HEAD");
+    let output = rewrite_pins_output(&f.app, &[]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("post-rewrite hook of githook-replaces-index"),
+        "{stderr}"
+    );
+    assert_eq!(rev(&f.app, "HEAD"), head);
+    rewrite_pins(&f.app, &["--dry-run"]);
 }

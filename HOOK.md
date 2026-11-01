@@ -29,7 +29,19 @@ git -C <submodule> config --add remote.<remote>.fetch '+refs/notes/replaces*:ref
 
 The refspec is a glob, so that a remote without replaces notes matches nothing rather than failing the fetch. `git submodule update`, which fetches with the remote's configuration, then brings in the notes with the commits.
 
-The notes are a weak link: they are a ref beside the history, which a remote may not keep, a clone may not fetch, and a `git notes` command may overwrite. A roll forward that relies on them therefore prints a warning, which names the commit that stands in place of the pin and says that the parent should pin it instead.
+The notes are a weak link: they are a ref beside the history, which a remote may not keep, a clone may not fetch, and a `git notes` command may overwrite. A roll forward that relies on them therefore prints a warning, which names the commit that stands in place of the pin and says that the parent should pin it instead, or rewrite its history with `rewrite-pins`.
+
+## Rewriting the pins in history
+
+`githook-submodule-roll rewrite-pins [--dry-run] [<branch>...]`, run in the parent, rewrites the history of the branches it names, or of the current branch, so that each pin that the notes say a rewrite replaced names the commit that stands in its place, and no longer relies on the notes:
+
+- A pin is rewritten only when no remote-tracking branch or tag of the submodule holds it, and the notes lead from it to a single newest version that one does hold: a version that the notes say no other published version replaces. A pin that the remotes still hold is left as it is, since the notes record which commit was made from which, not that the old one was withdrawn; a pin with several newest versions is left as it is, with a warning. The submodule must be checked out, so that its notes and refs can be read; the pins of a submodule that is not checked out are left as they are, with a warning.
+- Each commit that holds such a pin, or whose parents were rewritten, is written anew with the new gitlinks and parents. Its author, committer, dates and message are kept as they are; a signature is dropped, since it no longer matches. Each other commit is kept as it is.
+- Each branch is moved to its rewrite only from the commit that it was read at. When the current branch is rewritten, `ORIG_HEAD` is set to the commit it was at, and each gitlink of the index that holds a rewritten pin is given the new one, so that the index does not undo the rewrite; the submodules' checkouts are not moved.
+- The `post-rewrite` hooks of the parent are run as after a rebase, with a line `<old> <new>` for each rewritten commit, through `git hook run`, so that a hook such as that of the replaces index records the rewrite. A failing hook draws a warning.
+- A remote-tracking branch that holds rewritten commits draws a warning: a push of the rewrite must force, as `git push --force-with-lease` does.
+
+`rewrite-pins` refuses to rewrite unless a `post-rewrite` hook of the git config, as `git hook list post-rewrite` lists them, runs `githook-replaces-index-post-rewrite`: without it, nothing records which commit each rewritten one was made from, and the commits that held the old pins, such as those that other clones and branches still hold, can no longer be found from their rewrites. `--dry-run` prints the pins that would be rewritten, and the number of commits, and writes nothing; it does not need the hook. The pins of the submodules within a submodule are not rewritten, since they are part of the submodule's history.
 
 ## Events
 
