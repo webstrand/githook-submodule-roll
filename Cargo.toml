@@ -1,0 +1,16 @@
+[package]
+name = "githook-submodule-roll"
+version = "0.1.0"
+edition = "2024"
+description = "Rolls each submodule forward from its pin to the highest compatible release tag"
+license = "AGPL-3.0-only"
+publish = false
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[workspace]
