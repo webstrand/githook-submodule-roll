@@ -1,6 +1,8 @@
 //! Rolls each submodule forward from the commit that its parent pins to the tag that `tags`
 //! finds, and the submodules within it, in turn.
 
+use std::collections::HashSet;
+
 use crate::replaces::Replaces;
 use crate::repo::Repo;
 use crate::runner::{self, Error};
@@ -8,20 +10,63 @@ use crate::tags;
 
 const NAME: &str = "githook-submodule-roll";
 
-/// Rolls forward each checked-out submodule that the index of `repo` pins. `prev` are the commits
-/// that `repo` was at before, whose pins a submodule may still follow.
+/// The attribute that a parent sets on the path of a submodule that is to be rolled forward.
+const ATTRIBUTE: &str = "submodule-roll";
+
+/// Rolls forward each checked-out submodule that the index of `repo` pins and that its
+/// attributes opt in. `prev` are the commits that `repo` was at before, whose pins a submodule
+/// may still follow.
 pub fn roll(repo: &Repo, prev: &[String]) -> Result<(), Error> {
     let index = repo.stdout(["ls-files", "--stage", "-z"])?;
+    let mut gitlinks = Vec::new();
     for entry in index.split('\0').filter(|entry| !entry.is_empty()) {
         let Some((meta, path)) = entry.split_once('\t') else {
             continue;
         };
         // A gitlink is merged by stage 0 alone, and a conflict leaves the submodule as it is.
         if let ["160000", pin, "0"] = meta.split(' ').collect::<Vec<_>>()[..] {
+            gitlinks.push((path, pin));
+        }
+    }
+    if gitlinks.is_empty() {
+        return Ok(());
+    }
+    let opted_in = opted_in(repo, gitlinks.iter().map(|(path, _)| *path))?;
+    for (path, pin) in gitlinks {
+        if opted_in.contains(path) {
             submodule(repo, path, pin, prev)?;
+        } else {
+            // The submodules within it may opt in through its own attributes.
+            let sub = repo.submodule(path);
+            if sub.is_checked_out() {
+                let head = sub.stdout(["rev-parse", "HEAD"])?;
+                roll(&sub, std::slice::from_ref(&head))?;
+            }
         }
     }
     Ok(())
+}
+
+/// The paths, of `paths`, for which the attributes of `repo` set `submodule-roll`, as the
+/// working tree's `.gitattributes` files and `$GIT_DIR/info/attributes` give them.
+fn opted_in<'a>(
+    repo: &Repo,
+    paths: impl Iterator<Item = &'a str>,
+) -> Result<HashSet<String>, Error> {
+    let input: String = paths.map(|path| format!("{path}\0")).collect();
+    let output = runner::bytes_with_input(
+        &mut repo.git(["check-attr", "-z", "--stdin", ATTRIBUTE]),
+        input.as_bytes(),
+    )?;
+    let output = String::from_utf8_lossy(&output);
+    let fields: Vec<&str> = output.split('\0').collect();
+    Ok(fields
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .filter(|entry| entry[2] == "set")
+        .map(|entry| entry[0].to_owned())
+        .collect())
 }
 
 fn submodule(parent: &Repo, path: &str, pin: &str, prev: &[String]) -> Result<(), Error> {

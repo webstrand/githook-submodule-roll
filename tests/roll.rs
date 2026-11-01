@@ -66,6 +66,15 @@ fn tag(repo: &Path, name: &str) {
     git(repo, &["tag", name]);
 }
 
+/// Sets the `submodule-roll` attribute on the submodule at `path`, and stages it.
+fn opt_in(repo: &Path, path: &str) {
+    let attributes = repo.join(".gitattributes");
+    let mut lines = fs::read_to_string(&attributes).unwrap_or_default();
+    lines.push_str(&format!("/{path} submodule-roll\n"));
+    fs::write(&attributes, lines).unwrap();
+    git(repo, &["add", ".gitattributes"]);
+}
+
 /// Registers the hook in `repo`'s config, as `install.sh` does.
 fn install(repo: &Path) {
     for event in ["post-checkout", "post-merge", "post-rewrite"] {
@@ -113,6 +122,7 @@ fn application(dir: &Path, library: &Path, pin: &str) {
         dir,
         &["submodule", "add", "-q", library.to_str().unwrap(), "lib"],
     );
+    opt_in(dir, "lib");
     git(&dir.join("lib"), &["checkout", "-q", "--detach", pin]);
     git(dir, &["add", "lib"]);
     git(dir, &["commit", "-q", "-m", "app"]);
@@ -321,6 +331,7 @@ fn rolls_forward_the_submodules_within_a_submodule() {
         &mid,
         &["submodule", "add", "-q", lib.to_str().unwrap(), "lib"],
     );
+    opt_in(&mid, "lib");
     git(&mid.join("lib"), &["checkout", "-q", "--detach", &pin]);
     git(&mid, &["add", "lib"]);
     git(&mid, &["commit", "-q", "-m", "mid"]);
@@ -333,6 +344,7 @@ fn rolls_forward_the_submodules_within_a_submodule() {
         &app,
         &["submodule", "add", "-q", mid.to_str().unwrap(), "mid"],
     );
+    opt_in(&app, "mid");
     git(&app.join("mid"), &["checkout", "-q", "--detach", &mid_pin]);
     git(&app, &["add", "mid"]);
     git(
@@ -484,6 +496,7 @@ fn leaves_a_submodule_whose_untracked_files_the_target_would_overwrite() {
         &app,
         &["submodule", "add", "-q", other.to_str().unwrap(), "other"],
     );
+    opt_in(&app, "other");
     git(
         &app.join("other"),
         &["checkout", "-q", "--detach", &other_pin],
@@ -518,6 +531,7 @@ fn leaves_a_submodule_within_a_submodule_that_git_would_move_with_it() {
         &mid,
         &["submodule", "add", "-q", lib.to_str().unwrap(), "lib"],
     );
+    opt_in(&mid, "lib");
     git(&mid.join("lib"), &["checkout", "-q", "--detach", &pin]);
     git(&mid, &["add", "lib"]);
     git(&mid, &["commit", "-q", "-m", "mid"]);
@@ -530,6 +544,7 @@ fn leaves_a_submodule_within_a_submodule_that_git_would_move_with_it() {
         &app,
         &["submodule", "add", "-q", mid.to_str().unwrap(), "mid"],
     );
+    opt_in(&app, "mid");
     git(&app.join("mid"), &["checkout", "-q", "--detach", "v1.0.0"]);
     git(&app, &["add", "mid"]);
     git(
@@ -719,4 +734,32 @@ fn refuses_to_rewrite_pins_unless_the_replaces_index_records_the_rewrite() {
     );
     assert_eq!(rev(&f.app, "HEAD"), head);
     rewrite_pins(&f.app, &["--dry-run"]);
+}
+
+/// Replaces the attributes of `app` with `attributes`, and commits them.
+fn attributes(app: &Path, attributes: &str) {
+    fs::write(app.join(".gitattributes"), attributes).unwrap();
+    git(app, &["commit", "-q", "-am", "attributes"]);
+}
+
+#[test]
+fn leaves_a_submodule_that_its_parent_does_not_opt_in() {
+    for unset in ["", "/lib -submodule-roll\n"] {
+        let f = fixture();
+        attributes(&f.app, unset);
+        let (_, stderr) = git(&f.app, &["checkout", "-q", "-b", "other"]);
+        assert_eq!(rev(&f.app.join("lib"), "HEAD"), f.pin, "{unset:?}");
+        assert!(stderr.is_empty(), "{stderr}");
+    }
+}
+
+#[test]
+fn rolls_forward_a_submodule_that_a_pattern_opts_in() {
+    let f = fixture();
+    attributes(&f.app, "* submodule-roll\n");
+    git(&f.app, &["checkout", "-q", "-b", "other"]);
+    assert_eq!(
+        rev(&f.app.join("lib"), "HEAD"),
+        rev(&f.lib, "v1.9.0^{commit}")
+    );
 }

@@ -33,6 +33,22 @@ git submodule foreach --quiet --recursive '
       git config --add "remote.$remote.fetch" "$spec"
   done
 '
+# When this checkout is a submodule of the repository, the submodule roll rolls
+# it forward to its latest compatible release, unless the repository's
+# attributes say otherwise.
+top=$(cd -- "$(git rev-parse --show-toplevel)" && pwd -P)
+super=$(git -C "$src" rev-parse --show-superproject-working-tree 2>/dev/null || true)
+if [ -n "$super" ] && [ "$(cd -- "$super" && pwd -P)" = "$top" ]; then
+  path=${src#"$top"/}
+  attributes=$top/.gitattributes
+  if [ "$(git -C "$top" check-attr submodule-roll -- "$path")" = "$path: submodule-roll: unspecified" ]; then
+    if [ -s "$attributes" ] && [ -n "$(tail -c1 "$attributes")" ]; then
+      echo >>"$attributes"
+    fi
+    printf '/%s submodule-roll\n' "$path" >>"$attributes"
+    echo "githook-submodule-roll: set submodule-roll on $path in .gitattributes; commit it"
+  fi
+fi
 echo "githook-submodule-roll: installed into $root/bin"
 # The submodules are rolled forward from the pins of the index, as the next
 # checkout would roll them.
