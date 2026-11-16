@@ -33,6 +33,28 @@ git submodule foreach --quiet --recursive '
       git config --add "remote.$remote.fetch" "$spec"
   done
 '
+# A gitattributes pattern that matches the path $1, relative to the top of the
+# work tree, alone: C-quoted, so that it may hold spaces and bytes that are not
+# UTF-8, with its glob characters escaped.
+pattern() {
+  local LC_ALL=C path=$1 quoted= i char code
+  for ((i = 0; i < ${#path}; i++)); do
+    char=${path:i:1}
+    printf -v code '%d' "'$char"
+    case $char in
+      # A backslash escapes a glob character, and is itself escaped by quoting.
+      '*' | '?' | '[') quoted+='\\'$char ;;
+      '\') quoted+='\\\\' ;;
+      '"') quoted+='\"' ;;
+      *) if ((code < 32 || code > 126)); then
+        printf -v char '\\%03o' $((code & 255))
+      fi
+        quoted+=$char ;;
+    esac
+  done
+  printf '"/%s"\n' "$quoted"
+}
+
 # When this checkout is a submodule of the repository, the submodule roll rolls
 # it forward to its latest compatible release, unless the repository's
 # attributes say otherwise.
@@ -41,11 +63,14 @@ super=$(git -C "$src" rev-parse --show-superproject-working-tree 2>/dev/null || 
 if [ -n "$super" ] && [ "$(cd -- "$super" && pwd -P)" = "$top" ]; then
   path=${src#"$top"/}
   attributes=$top/.gitattributes
-  if [ "$(git -C "$top" check-attr submodule-roll -- "$path")" = "$path: submodule-roll: unspecified" ]; then
+  # `<path>\0<attribute>\0<value>\0`, the path unquoted whatever its bytes.
+  { IFS= read -r -d '' _ && IFS= read -r -d '' _ && IFS= read -r -d '' value; } \
+    < <(git -C "$top" check-attr -z submodule-roll -- "$path")
+  if [ "$value" = unspecified ]; then
     if [ -s "$attributes" ] && [ -n "$(tail -c1 "$attributes")" ]; then
       echo >>"$attributes"
     fi
-    printf '/%s submodule-roll\n' "$path" >>"$attributes"
+    printf '%s submodule-roll\n' "$(pattern "$path")" >>"$attributes"
     echo "githook-submodule-roll: set submodule-roll on $path in .gitattributes; commit it"
   fi
 fi
